@@ -21,3 +21,5 @@ Use the [Issues](https://github.com/PX4/px4_ros_com/issues) section to create a 
 Reach the PX4 development team on the [PX4 Discord Server](https://discord.gg/dronecode).
 
 ## ANCL lab-maintained fork
+
+Baseline/template branch: `lab/v1.16-com-baseline`
