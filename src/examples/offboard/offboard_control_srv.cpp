@@ -43,12 +43,16 @@
 #include <px4_msgs/msg/trajectory_setpoint.hpp>
 #include <px4_msgs/msg/vehicle_control_mode.hpp>
 #include <px4_msgs/srv/vehicle_command.hpp>
+#include <px4_msgs/msg/vehicle_odometry.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <stdint.h>
 
 #include <chrono>
 #include <iostream>
 #include <string>
+
+#include <Eigen/Core>
+#include <Eigen/Dense>
 
 using namespace std::chrono;
 using namespace std::chrono_literals;
@@ -64,8 +68,29 @@ public:
 		service_done_{false},
 		offboard_control_mode_publisher_{this->create_publisher<OffboardControlMode>(px4_namespace+"in/offboard_control_mode", 10)},
 		trajectory_setpoint_publisher_{this->create_publisher<TrajectorySetpoint>(px4_namespace+"in/trajectory_setpoint", 10)},
-		vehicle_command_client_{this->create_client<px4_msgs::srv::VehicleCommand>(px4_namespace+"vehicle_command")}
-	{
+		vehicle_command_client_{this->create_client<px4_msgs::srv::VehicleCommand>(px4_namespace+"vehicle_command")},
+		control_mode_{this->declare_parameter<std::string>("control_mode", "position")},
+		start_time_{this->now()},
+		vehicle_odometry_subscriber_{this->create_subscription<VehicleOdometry>(
+			px4_namespace + "out/vehicle_odometry",
+			10,
+			[this](const VehicleOdometry::SharedPtr msg) {
+				latest_odom_ = *msg;
+				odom_received_ = true;
+
+				Eigen::Vector3d p(
+					latest_odom_.position[0],
+					latest_odom_.position[1],
+					latest_odom_.position[2]);
+
+				Eigen::Vector3d v(
+					latest_odom_.velocity[0],
+					latest_odom_.velocity[1],
+					latest_odom_.velocity[2]);
+				
+				Eigen::Vector3d a_cmd = compute_acceleration_command(p, v, p_d, v_d);
+			})}
+		{
 		RCLCPP_INFO(this->get_logger(), "Starting Offboard Control example with PX4 services");
 		RCLCPP_INFO_STREAM(this->get_logger(), "Waiting for " << px4_namespace << "vehicle_command service");
 		while (!vehicle_command_client_->wait_for_service(1s)) {
@@ -99,12 +124,29 @@ private:
 	rclcpp::Publisher<TrajectorySetpoint>::SharedPtr trajectory_setpoint_publisher_;
 	rclcpp::Client<px4_msgs::srv::VehicleCommand>::SharedPtr vehicle_command_client_;
 
+	// setup odometer subscription
+	rclcpp::Subscription<VehicleOdometry>::SharedPtr vehicle_odometry_subscriber_;
+	VehicleOdometry latest_odom_{};
+	bool odom_received_{false};
 
+	// control mode
+	std::string control_mode_;
+
+	// init gain params
+	Eigen::Matrix3d K_p_ = 2.0 * Eigen::Matrix3d::Identity();
+	Eigen::Matrix3d K_v_ = 1.5 * Eigen::Matrix3d::Identity();
+	Eigen::Vector3d gravity_{0.0, 0.0, 9.81};
+
+	// time
+	rclcpp::Time start_time_;
+
+	// methods
 	void publish_offboard_control_mode();
 	void publish_trajectory_setpoint();
 	void request_vehicle_command(uint16_t command, float param1 = 0.0, float param2 = 0.0);
 	void response_callback(rclcpp::Client<px4_msgs::srv::VehicleCommand>::SharedFuture future);
-	void timer_callback(void);
+    void timer_callback(void);
+    Eigen::Vector3d compute_acceleration_command(const Eigen::Vector3d &p, const Eigen::Vector3d &v, const Eigen::Vector3d &p_d, const Eigen::Vector3d &v_d, const Eigen::Vector3d &a_d);
 };
 
 /**
@@ -277,6 +319,16 @@ void OffboardControl::response_callback(
       RCLCPP_INFO(this->get_logger(), "Service In-Progress...");
     }
   }
+
+Eigen::Vector3d OffboardControl::compute_acceleration_command(
+	const Eigen::Vector3d &p, const Eigen::Vector3d &v, const Eigen::Vector3d &p_d, 
+	const Eigen::Vector3d &v_d, const Eigen::Vector3d &a_d) {
+		const Eigen::Vector3d e_p = p - p_d;
+		const Eigen::Vector3d e_v = v - v_d;
+		const Eigen::Vector3d w = a_d - K_v_ * e_v - K_p_ * e_p;
+		const Eigen::Vector3d a_cmd = w + gravity_;
+		return a_cmd;
+}
 
 int main(int argc, char *argv[])
 {
