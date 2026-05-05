@@ -50,6 +50,7 @@
 #include <chrono>
 #include <iostream>
 #include <string>
+#include <cmath>
 
 #include <Eigen/Core>
 #include <Eigen/Dense>
@@ -69,27 +70,15 @@ public:
 		offboard_control_mode_publisher_{this->create_publisher<OffboardControlMode>(px4_namespace+"in/offboard_control_mode", 10)},
 		trajectory_setpoint_publisher_{this->create_publisher<TrajectorySetpoint>(px4_namespace+"in/trajectory_setpoint", 10)},
 		vehicle_command_client_{this->create_client<px4_msgs::srv::VehicleCommand>(px4_namespace+"vehicle_command")},
-		control_mode_{this->declare_parameter<std::string>("control_mode", "position")},
-		start_time_{this->now()},
 		vehicle_odometry_subscriber_{this->create_subscription<VehicleOdometry>(
 			px4_namespace + "out/vehicle_odometry",
-			10,
+			rclcpp::SensorDataQoS(),
 			[this](const VehicleOdometry::SharedPtr msg) {
 				latest_odom_ = *msg;
 				odom_received_ = true;
-
-				Eigen::Vector3d p(
-					latest_odom_.position[0],
-					latest_odom_.position[1],
-					latest_odom_.position[2]);
-
-				Eigen::Vector3d v(
-					latest_odom_.velocity[0],
-					latest_odom_.velocity[1],
-					latest_odom_.velocity[2]);
-				
-				Eigen::Vector3d a_cmd = compute_acceleration_command(p, v, p_d, v_d);
-			})}
+			})},
+		control_mode_{this->declare_parameter<std::string>("control_mode", "position")},
+		start_time_{this->now()}
 		{
 		RCLCPP_INFO(this->get_logger(), "Starting Offboard Control example with PX4 services");
 		RCLCPP_INFO_STREAM(this->get_logger(), "Waiting for " << px4_namespace << "vehicle_command service");
@@ -101,7 +90,7 @@ public:
 			RCLCPP_INFO(this->get_logger(), "service not available, waiting again...");
 		}
 
-		timer_ = this->create_wall_timer(100ms, std::bind(&OffboardControl::timer_callback, this));
+		timer_ = this->create_wall_timer(10ms, std::bind(&OffboardControl::timer_callback, this));
 	}
 
 	void switch_to_offboard_mode();
@@ -116,6 +105,14 @@ private:
 		arm_requested,
 		armed
 	} state_;
+
+	struct TrajectoryReference {
+		Eigen::Vector3d position;
+		Eigen::Vector3d velocity;
+		Eigen::Vector3d acceleration;
+		float yaw;
+	};
+
 	uint8_t service_result_;
 	bool service_done_;
 	rclcpp::TimerBase::SharedPtr timer_;
@@ -132,10 +129,15 @@ private:
 	// control mode
 	std::string control_mode_;
 
-	// init gain params
+	// init gain params/consts
 	Eigen::Matrix3d K_p_ = 2.0 * Eigen::Matrix3d::Identity();
 	Eigen::Matrix3d K_v_ = 1.5 * Eigen::Matrix3d::Identity();
 	Eigen::Vector3d gravity_{0.0, 0.0, 9.81};
+
+	// 
+	Eigen::Vector3d p_d{0.0, 0.0, -5.0};
+	Eigen::Vector3d v_d = Eigen::Vector3d::Zero();
+	Eigen::Vector3d a_d = Eigen::Vector3d::Zero();
 
 	// time
 	rclcpp::Time start_time_;
@@ -146,6 +148,7 @@ private:
 	void request_vehicle_command(uint16_t command, float param1 = 0.0, float param2 = 0.0);
 	void response_callback(rclcpp::Client<px4_msgs::srv::VehicleCommand>::SharedFuture future);
     void timer_callback(void);
+	TrajectoryReference compute_figure8_reference(double t_sec) const;
     Eigen::Vector3d compute_acceleration_command(const Eigen::Vector3d &p, const Eigen::Vector3d &v, const Eigen::Vector3d &p_d, const Eigen::Vector3d &v_d, const Eigen::Vector3d &a_d);
 };
 
@@ -182,26 +185,79 @@ void OffboardControl::disarm()
 void OffboardControl::publish_offboard_control_mode()
 {
 	OffboardControlMode msg{};
-	msg.position = true;
+	msg.position = (control_mode_ == "position");
 	msg.velocity = false;
-	msg.acceleration = false;
+	msg.acceleration = (control_mode_ == "acceleration");
 	msg.attitude = false;
 	msg.body_rate = false;
-	msg.timestamp = this->get_clock()->now().nanoseconds() / 1000;
+	msg.timestamp = latest_odom_.timestamp;
+	//msg.timestamp = this->get_clock()->now().nanoseconds() / 1000;
 	offboard_control_mode_publisher_->publish(msg);
 }
 
 /**
  * @brief Publish a trajectory setpoint
- *        For this example, it sends a trajectory setpoint to make the
- *        vehicle hover at 5 meters with a yaw angle of 180 degrees.
+ *        
  */
 void OffboardControl::publish_trajectory_setpoint()
 {
+
+	if (!odom_received_) {
+		RCLCPP_WARN_THROTTLE(
+			this->get_logger(),
+			*this->get_clock(),
+			2000,
+			"Waiting for vehicle odometry");
+		return;
+	}
+
+	const double t_sec = (this->now() - start_time_).seconds();
+	const TrajectoryReference ref = compute_figure8_reference(t_sec);
+
+	const Eigen::Vector3d p(
+		latest_odom_.position[0],
+		latest_odom_.position[1],
+		latest_odom_.position[2]);
+
+	const Eigen::Vector3d v(
+		latest_odom_.velocity[0],
+		latest_odom_.velocity[1],
+		latest_odom_.velocity[2]);
+
+	const Eigen::Vector3d a_cmd =
+		compute_acceleration_command(p, v, ref.position, ref.velocity, ref.acceleration);
+
 	TrajectorySetpoint msg{};
-	msg.position = {0.0, 0.0, -5.0};
-	msg.yaw = -3.14; // [-PI:PI]
-	msg.timestamp = this->get_clock()->now().nanoseconds() / 1000;
+	msg.yaw = ref.yaw;
+	msg.timestamp = latest_odom_.timestamp;
+
+	Eigen::Vector3d p_d = ref.position;
+
+	if (control_mode_ == "position") {
+		msg.position = {
+			static_cast<float>(p_d.x()),
+			static_cast<float>(p_d.y()),
+			static_cast<float>(p_d.z())
+		};
+	} else if (control_mode_ == "acceleration") {
+		msg.position = {NAN, NAN, NAN};
+		msg.velocity = {NAN, NAN, NAN};
+		msg.acceleration = {
+			static_cast<float>(a_cmd.x()),
+			static_cast<float>(a_cmd.y()),
+			static_cast<float>(a_cmd.z())
+		};
+	} else {
+		RCLCPP_WARN(this->get_logger(),
+		"Unknown control_mode '%s', falling back to position mode",
+		control_mode_.c_str());
+		msg.position = {
+			static_cast<float>(p_d.x()),
+			static_cast<float>(p_d.y()),
+			static_cast<float>(p_d.z())
+		};
+	}
+
 	trajectory_setpoint_publisher_->publish(msg);
 }
 
@@ -243,8 +299,11 @@ void OffboardControl::timer_callback(void){
 	switch (state_)
 	{
 	case State::init :
-		switch_to_offboard_mode();
-		state_ = State::offboard_requested;
+		if (odom_received_) {
+			switch_to_offboard_mode();
+			state_ = State::offboard_requested;
+		}	
+
 		break;
 	case State::offboard_requested :
 		if(service_done_){
@@ -259,7 +318,7 @@ void OffboardControl::timer_callback(void){
 		}
 		break;
 	case State::wait_for_stable_offboard_mode :
-		if (++num_of_steps>10){
+		if (++num_of_steps>100) {
 			arm();
 			state_ = State::arm_requested;
 		}
@@ -320,13 +379,43 @@ void OffboardControl::response_callback(
     }
   }
 
+OffboardControl::TrajectoryReference OffboardControl::compute_figure8_reference(double t_sec) const {
+	const double A = 2.0;
+	const double B = 1.0;
+	const double omega = 0.4;
+	const double z_ref = -5.0;
+
+	const double s = std::sin(omega * t_sec);
+	const double c = std::cos(omega * t_sec);
+
+	TrajectoryReference ref{};
+
+	ref.position = Eigen::Vector3d(
+		A * s,
+		B * s * c,
+		z_ref);
+
+	ref.velocity = Eigen::Vector3d(
+		A * omega * c,
+		B * omega * (c * c - s * s),
+		0.0);
+
+	ref.acceleration = Eigen::Vector3d(
+		-A * omega * omega * s,
+		-4.0 * B * omega * omega * s * c,
+		0.0);
+
+	ref.yaw = 0.0f;
+	return ref;
+}
+
 Eigen::Vector3d OffboardControl::compute_acceleration_command(
 	const Eigen::Vector3d &p, const Eigen::Vector3d &v, const Eigen::Vector3d &p_d, 
 	const Eigen::Vector3d &v_d, const Eigen::Vector3d &a_d) {
 		const Eigen::Vector3d e_p = p - p_d;
 		const Eigen::Vector3d e_v = v - v_d;
 		const Eigen::Vector3d w = a_d - K_v_ * e_v - K_p_ * e_p;
-		const Eigen::Vector3d a_cmd = w + gravity_;
+		const Eigen::Vector3d a_cmd = w - gravity_;
 		return a_cmd;
 }
 

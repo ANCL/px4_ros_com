@@ -63,7 +63,7 @@ install(TARGETS offboard_control DESTINATION lib/${PROJECT_NAME})
 
 # examples/offboard/offboard_control_srv
 add_executable(offboard_control_srv src/examples/offboard/offboard_control_srv.cpp)
-ament_target_dependencies(offboard_control_srv rclcpp px4_msgs)
+ament_target_dependencies(offboard_control_srv rclcpp px4_msgs Eigen3)
 install(TARGETS offboard_control_srv DESTINATION lib/${PROJECT_NAME})
 
 
