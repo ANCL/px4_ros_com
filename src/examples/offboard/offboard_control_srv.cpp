@@ -134,7 +134,6 @@ private:
 
 	Eigen::Matrix3d K_p_ = 1 * Eigen::Matrix3d::Identity();
 	Eigen::Matrix3d K_v_ = 0.8 * Eigen::Matrix3d::Identity();
-	Eigen::Vector3d gravity_{0.0, 0.0, -9.81};
 
 	rclcpp::Time start_time_;
 
@@ -179,7 +178,7 @@ private:
 		const Eigen::Vector3d e_p = p - p_d;
 		const Eigen::Vector3d e_v = v - v_d;
 		const Eigen::Vector3d w = a_d - K_v_ * e_v - K_p_ * e_p;
-		const Eigen::Vector3d a_cmd = w + gravity_;
+		const Eigen::Vector3d a_cmd = w;
 		return a_cmd;
 	}
 	
