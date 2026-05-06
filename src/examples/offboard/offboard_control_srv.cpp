@@ -132,9 +132,8 @@ private:
 	// init gain params/consts
 	Eigen::Matrix3d K_p_ = 2.0 * Eigen::Matrix3d::Identity();
 	Eigen::Matrix3d K_v_ = 1.5 * Eigen::Matrix3d::Identity();
-	Eigen::Vector3d gravity_{0.0, 0.0, 9.81};
 
-	// 
+	// initial setpoints
 	Eigen::Vector3d p_d{0.0, 0.0, -5.0};
 	Eigen::Vector3d v_d = Eigen::Vector3d::Zero();
 	Eigen::Vector3d a_d = Eigen::Vector3d::Zero();
@@ -415,7 +414,7 @@ Eigen::Vector3d OffboardControl::compute_acceleration_command(
 		const Eigen::Vector3d e_p = p - p_d;
 		const Eigen::Vector3d e_v = v - v_d;
 		const Eigen::Vector3d w = a_d - K_v_ * e_v - K_p_ * e_p;
-		const Eigen::Vector3d a_cmd = w - gravity_;
+		const Eigen::Vector3d a_cmd = w;
 		return a_cmd;
 }
 
