@@ -13,7 +13,7 @@ class TrajectoryPublisher : public rclcpp::Node {
 
 public:
     TrajectoryPublisher() : Node("trajectory_publisher") {
-        publisher_ = this->create_publisher<px4_msgs::msg::TrajectorySetpoint>("/fmu/in/trajectory_reference", 10);
+        publisher_ = this->create_publisher<px4_msgs::msg::TrajectorySetpoint>("/custom/trajectory_reference", 10);
         flight_path_ = this->declare_parameter<std::string>("flight_path", "figure8");
 
         // add a timer to run at 50Hz (20ms)

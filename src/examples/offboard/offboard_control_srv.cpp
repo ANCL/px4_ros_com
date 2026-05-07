@@ -43,8 +43,8 @@
 #include <px4_msgs/msg/trajectory_setpoint.hpp>
 #include <px4_msgs/msg/vehicle_control_mode.hpp>
 #include <px4_msgs/srv/vehicle_command.hpp>
-#include <px4_msgs/msg/vehicle_odometry.hpp>
-//#include <px4_msgs/msg/vehicle_local_position.hpp> // new
+//#include <px4_msgs/msg/vehicle_odometry.hpp> // got rid of this t
+#include <px4_msgs/msg/vehicle_local_position.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <stdint.h>
 
@@ -74,15 +74,23 @@ public:
 		offboard_control_mode_publisher_{this->create_publisher<OffboardControlMode>(px4_namespace+"in/offboard_control_mode", 10)},
 		trajectory_setpoint_publisher_{this->create_publisher<TrajectorySetpoint>(px4_namespace+"in/trajectory_setpoint", 10)},
 		vehicle_command_client_{this->create_client<px4_msgs::srv::VehicleCommand>(px4_namespace+"vehicle_command")},
-		vehicle_odometry_subscriber_{this->create_subscription<VehicleOdometry>(
-			px4_namespace + "out/vehicle_odometry",
-			rclcpp::SensorDataQoS(),
-			[this](const VehicleOdometry::SharedPtr msg) {
-				latest_odom_ = *msg;
-				odom_received_ = true;
-			})},
+		vehicle_local_position_subscriber_{this->create_subscription<px4_msgs::msg::VehicleLocalPosition>(
+            px4_namespace + "out/vehicle_local_position",
+            rclcpp::SensorDataQoS(),
+            [this](const px4_msgs::msg::VehicleLocalPosition::SharedPtr msg) {
+                
+                // rely on PX4's internal EKF2 validity flags
+                if (!msg->xy_valid || !msg->z_valid || !msg->v_xy_valid || !msg->v_z_valid) {
+                    RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000, "EKF2 Local position invalid! Ignoring.");
+                    return;
+                }
+
+                // Update state
+                latest_local_pos_ = *msg;
+                pos_received_ = true; 
+            })},
 		trajectory_ref_subscriber_{this->create_subscription<TrajectorySetpoint>(
-			px4_namespace + "in/trajectory_reference",
+			"custom/trajectory_reference",
 			10,
 			[this](const TrajectorySetpoint::SharedPtr msg) {
 				latest_ref_ = *msg;
@@ -134,10 +142,10 @@ private:
 	rclcpp::Publisher<TrajectorySetpoint>::SharedPtr trajectory_setpoint_publisher_;
 	rclcpp::Client<px4_msgs::srv::VehicleCommand>::SharedPtr vehicle_command_client_;
 
-	// setup odometer subscription
-	rclcpp::Subscription<VehicleOdometry>::SharedPtr vehicle_odometry_subscriber_;
-	VehicleOdometry latest_odom_{};
-	bool odom_received_{false};
+	// setup local position subscription
+	rclcpp::Subscription<px4_msgs::msg::VehicleLocalPosition>::SharedPtr vehicle_local_position_subscriber_;
+    px4_msgs::msg::VehicleLocalPosition latest_local_pos_{};
+	bool pos_received_{false};
 
 	// setup trajectory reference subscription
 	rclcpp::Subscription<TrajectorySetpoint>::SharedPtr trajectory_ref_subscriber_;
@@ -229,24 +237,24 @@ void OffboardControl::publish_offboard_control_mode()
 void OffboardControl::publish_trajectory_setpoint()
 {
 
-	if (!odom_received_ || !ref_received_) {
+	if (!pos_received_ || !ref_received_) {
 		RCLCPP_WARN_THROTTLE(
 			this->get_logger(),
 			*this->get_clock(),
 			2000,
-			"Waiting for vehicle odometry and trajectory reference");
+			"Waiting for vehicle local position and trajectory reference");
 		return;
 	}	
 	
 	const Eigen::Vector3d p(
-		latest_odom_.position[0],
-		latest_odom_.position[1],
-		latest_odom_.position[2]);
+		latest_local_pos_.x,
+		latest_local_pos_.y,
+		latest_local_pos_.z);
 		
 	const Eigen::Vector3d v(
-		latest_odom_.velocity[0],
-		latest_odom_.velocity[1],
-		latest_odom_.velocity[2]);
+		latest_local_pos_.vx,
+		latest_local_pos_.vy,
+		latest_local_pos_.vz);
 			
 	// get latest reference path from trajectory_publisher
 	TrajectorySetpoint ref = latest_ref_;
@@ -335,7 +343,7 @@ void OffboardControl::timer_callback(void){
 	switch (state_)
 	{
 	case State::init :
-		if (odom_received_) {
+		if (pos_received_) {
 			switch_to_offboard_mode();
 			state_ = State::offboard_requested;
 		}	
