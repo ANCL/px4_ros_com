@@ -8,6 +8,7 @@ from launch_ros.actions import Node
 
 def generate_launch_description():
     control_mode = LaunchConfiguration("control_mode")
+    flight_path = LaunchConfiguration("flight_path")
 
     return LaunchDescription([
         DeclareLaunchArgument(
@@ -24,4 +25,13 @@ def generate_launch_description():
                 "control_mode": control_mode,
             }],
         ),
+        Node(
+            package="px4_ros_com",
+            executable="trajectory_publisher",
+            name="trajectory_publisher",
+            output="screen",
+            parameters=[{
+                "flight_path": flight_path,
+            }]
+        )
     ])

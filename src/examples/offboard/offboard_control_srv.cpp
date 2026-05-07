@@ -77,6 +77,14 @@ public:
 				latest_odom_ = *msg;
 				odom_received_ = true;
 			})},
+		trajectory_ref_subscriber_{this->create_subscription<TrajectorySetpoint>(
+			px4_namespace + "in/trajectory_reference",
+			10,
+			[this](const TrajectorySetpoint::SharedPtr msg) {
+				latest_ref_ = *msg;
+				ref_received_ = true;
+			}
+		)},
 		control_mode_{this->declare_parameter<std::string>("control_mode", "position")},
 		start_time_{this->now()}
 		{
@@ -91,7 +99,7 @@ public:
 		}
 
 		timer_ = this->create_wall_timer(10ms, std::bind(&OffboardControl::timer_callback, this));
-	}
+		}
 
 	void switch_to_offboard_mode();
 	void arm();
@@ -106,13 +114,6 @@ private:
 		armed
 	} state_;
 
-	struct TrajectoryReference {
-		Eigen::Vector3d position;
-		Eigen::Vector3d velocity;
-		Eigen::Vector3d acceleration;
-		float yaw;
-	};
-
 	uint8_t service_result_;
 	bool service_done_;
 	rclcpp::TimerBase::SharedPtr timer_;
@@ -125,6 +126,11 @@ private:
 	rclcpp::Subscription<VehicleOdometry>::SharedPtr vehicle_odometry_subscriber_;
 	VehicleOdometry latest_odom_{};
 	bool odom_received_{false};
+
+	// setup trajectory reference subscription
+	rclcpp::Subscription<TrajectorySetpoint>::SharedPtr trajectory_ref_subscriber_;
+	TrajectorySetpoint latest_ref_;
+	bool ref_received_{false};
 
 	// control mode
 	std::string control_mode_;
@@ -147,7 +153,6 @@ private:
 	void request_vehicle_command(uint16_t command, float param1 = 0.0, float param2 = 0.0);
 	void response_callback(rclcpp::Client<px4_msgs::srv::VehicleCommand>::SharedFuture future);
     void timer_callback(void);
-	TrajectoryReference compute_figure8_reference(double t_sec) const;
     Eigen::Vector3d compute_acceleration_command(const Eigen::Vector3d &p, const Eigen::Vector3d &v, const Eigen::Vector3d &p_d, const Eigen::Vector3d &v_d, const Eigen::Vector3d &a_d);
 };
 
@@ -189,8 +194,7 @@ void OffboardControl::publish_offboard_control_mode()
 	msg.acceleration = (control_mode_ == "acceleration");
 	msg.attitude = false;
 	msg.body_rate = false;
-	msg.timestamp = latest_odom_.timestamp;
-	//msg.timestamp = this->get_clock()->now().nanoseconds() / 1000;
+	msg.timestamp = this->get_clock()->now().nanoseconds() / 1000;
 	offboard_control_mode_publisher_->publish(msg);
 }
 
@@ -201,36 +205,38 @@ void OffboardControl::publish_offboard_control_mode()
 void OffboardControl::publish_trajectory_setpoint()
 {
 
-	if (!odom_received_) {
+	if (!odom_received_ || !ref_received_) {
 		RCLCPP_WARN_THROTTLE(
 			this->get_logger(),
 			*this->get_clock(),
 			2000,
-			"Waiting for vehicle odometry");
+			"Waiting for vehicle odometry and trajectory reference");
 		return;
-	}
-
-	const double t_sec = (this->now() - start_time_).seconds();
-	const TrajectoryReference ref = compute_figure8_reference(t_sec);
-
+	}	
+	
 	const Eigen::Vector3d p(
 		latest_odom_.position[0],
 		latest_odom_.position[1],
 		latest_odom_.position[2]);
-
+		
 	const Eigen::Vector3d v(
 		latest_odom_.velocity[0],
 		latest_odom_.velocity[1],
 		latest_odom_.velocity[2]);
+			
+	// get latest reference path from trajectory_publisher
+	TrajectorySetpoint ref = latest_ref_;
+	Eigen::Vector3d p_ref = Eigen::Vector3d(latest_ref_.position[0], latest_ref_.position[1], latest_ref_.position[2]);
+	Eigen::Vector3d v_ref = Eigen::Vector3d(latest_ref_.velocity[0], latest_ref_.velocity[1], latest_ref_.velocity[2]);
+	Eigen::Vector3d a_ref = Eigen::Vector3d(latest_ref_.acceleration[0], latest_ref_.acceleration[1], latest_ref_.acceleration[2]);
 
-	const Eigen::Vector3d a_cmd =
-		compute_acceleration_command(p, v, ref.position, ref.velocity, ref.acceleration);
+	//const TrajectoryReference ref = compute_figure8_reference(t_sec);
+	const Eigen::Vector3d a_cmd = compute_acceleration_command(p, v, p_ref, v_ref, a_ref);
 
 	TrajectorySetpoint msg{};
 	msg.yaw = ref.yaw;
-	msg.timestamp = latest_odom_.timestamp;
-
-	Eigen::Vector3d p_d = ref.position;
+	msg.timestamp = this->get_clock()->now().nanoseconds() / 1000;
+	Eigen::Vector3d p_d = p_ref;
 
 	if (control_mode_ == "position") {
 		msg.position = {
@@ -238,6 +244,8 @@ void OffboardControl::publish_trajectory_setpoint()
 			static_cast<float>(p_d.y()),
 			static_cast<float>(p_d.z())
 		};
+		msg.velocity = {NAN, NAN, NAN};
+        msg.acceleration = {NAN, NAN, NAN};
 	} else if (control_mode_ == "acceleration") {
 		msg.position = {NAN, NAN, NAN};
 		msg.velocity = {NAN, NAN, NAN};
@@ -255,6 +263,8 @@ void OffboardControl::publish_trajectory_setpoint()
 			static_cast<float>(p_d.y()),
 			static_cast<float>(p_d.z())
 		};
+		msg.velocity = {NAN, NAN, NAN};
+        msg.acceleration = {NAN, NAN, NAN};
 	}
 
 	trajectory_setpoint_publisher_->publish(msg);
@@ -378,35 +388,7 @@ void OffboardControl::response_callback(
     }
   }
 
-OffboardControl::TrajectoryReference OffboardControl::compute_figure8_reference(double t_sec) const {
-	const double A = 2.0;
-	const double B = 1.0;
-	const double omega = 0.4;
-	const double z_ref = -5.0;
 
-	const double s = std::sin(omega * t_sec);
-	const double c = std::cos(omega * t_sec);
-
-	TrajectoryReference ref{};
-
-	ref.position = Eigen::Vector3d(
-		A * s,
-		B * s * c,
-		z_ref);
-
-	ref.velocity = Eigen::Vector3d(
-		A * omega * c,
-		B * omega * (c * c - s * s),
-		0.0);
-
-	ref.acceleration = Eigen::Vector3d(
-		-A * omega * omega * s,
-		-4.0 * B * omega * omega * s * c,
-		0.0);
-
-	ref.yaw = 0.0f;
-	return ref;
-}
 
 Eigen::Vector3d OffboardControl::compute_acceleration_command(
 	const Eigen::Vector3d &p, const Eigen::Vector3d &v, const Eigen::Vector3d &p_d, 
