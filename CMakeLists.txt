@@ -66,6 +66,10 @@ add_executable(offboard_control_srv src/examples/offboard/offboard_control_srv.c
 ament_target_dependencies(offboard_control_srv rclcpp px4_msgs Eigen3)
 install(TARGETS offboard_control_srv DESTINATION lib/${PROJECT_NAME})
 
+# examples/offboard/trajectory_publisher
+add_executable(trajectory_publisher src/examples/offboard/trajectory_publisher.cpp)
+ament_target_dependencies(trajectory_publisher rclcpp px4_msgs Eigen3)
+install(TARGETS trajectory_publisher DESTINATION lib/${PROJECT_NAME})
 
 ############
 # Install ##
