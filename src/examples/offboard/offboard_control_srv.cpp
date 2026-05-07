@@ -227,8 +227,8 @@ void OffboardControl::publish_offboard_control_mode()
 	msg.acceleration = (control_mode_ == "acceleration");
 	msg.attitude = false;
 	msg.body_rate = false;
-	msg.timestamp = latest_odometry_.timestamp;
-	//msg.timestamp = this->get_clock()->now().nanoseconds() / 1000;
+	//msg.timestamp = latest_odometry_.timestamp;
+	msg.timestamp = this->get_clock()->now().nanoseconds() / 1000;
 	offboard_control_mode_publisher_->publish(msg);
 }
 
@@ -272,8 +272,8 @@ void OffboardControl::publish_trajectory_setpoint()
     msg.jerk = {NAN, NAN, NAN};
 
 	msg.yaw = ref.yaw;
-	msg.timestamp = latest_odometry_.timestamp;
-	//msg.timestamp = this->get_clock()->now().nanoseconds() / 1000;
+	//msg.timestamp = latest_odometry_.timestamp;
+	msg.timestamp = this->get_clock()->now().nanoseconds() / 1000;
 
 	if (control_mode_ == "position") {
 		msg.position = {
