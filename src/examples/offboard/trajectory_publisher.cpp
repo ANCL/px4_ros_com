@@ -77,7 +77,7 @@ private:
     }
 
     TrajectoryReference compute_circle_reference(double t_sec) const {
-        const double R = 5.0;
+        const double R = 3.0;
         const double omega = 0.4;
         const double z_ref = -5.0;
         

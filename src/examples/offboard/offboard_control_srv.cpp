@@ -44,6 +44,7 @@
 #include <px4_msgs/msg/vehicle_control_mode.hpp>
 #include <px4_msgs/srv/vehicle_command.hpp>
 #include <px4_msgs/msg/vehicle_odometry.hpp>
+//#include <px4_msgs/msg/vehicle_local_position.hpp> // new
 #include <rclcpp/rclcpp.hpp>
 #include <stdint.h>
 
@@ -54,6 +55,9 @@
 
 #include <Eigen/Core>
 #include <Eigen/Dense>
+
+#include <nav_msgs/msg/path.hpp>
+#include <geometry_msgs/msg/pose_stamped.hpp>
 
 using namespace std::chrono;
 using namespace std::chrono_literals;
@@ -86,8 +90,16 @@ public:
 			}
 		)},
 		control_mode_{this->declare_parameter<std::string>("control_mode", "position")},
-		start_time_{this->now()}
+		start_time_{this->now()},
+		
+		actual_path_pub_{this->create_publisher<nav_msgs::msg::Path>("viz/actual_path", 10)},
+    	ref_path_pub_{this->create_publisher<nav_msgs::msg::Path>("viz/ref_path", 10)}
 		{
+		// set the frame ID for the paths
+		actual_path_msg_.header.frame_id = "map";
+    	ref_path_msg_.header.frame_id = "map";
+
+		// log and wait for vehicle command service
 		RCLCPP_INFO(this->get_logger(), "Starting Offboard Control example with PX4 services");
 		RCLCPP_INFO_STREAM(this->get_logger(), "Waiting for " << px4_namespace << "vehicle_command service");
 		while (!vehicle_command_client_->wait_for_service(1s)) {
@@ -147,6 +159,17 @@ private:
 	// time
 	rclcpp::Time start_time_;
 
+	// path publishers
+    rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr actual_path_pub_;
+    rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr ref_path_pub_;
+
+    // path message objects to hold the history of points
+    nav_msgs::msg::Path actual_path_msg_;
+    nav_msgs::msg::Path ref_path_msg_;
+
+    // max points to prevent memory from blowing up on long flights
+    const size_t MAX_PATH_LENGTH = 2000;
+
 	// methods
 	void publish_offboard_control_mode();
 	void publish_trajectory_setpoint();
@@ -154,6 +177,7 @@ private:
 	void response_callback(rclcpp::Client<px4_msgs::srv::VehicleCommand>::SharedFuture future);
     void timer_callback(void);
     Eigen::Vector3d compute_acceleration_command(const Eigen::Vector3d &p, const Eigen::Vector3d &v, const Eigen::Vector3d &p_d, const Eigen::Vector3d &v_d, const Eigen::Vector3d &a_d);
+	void publish_paths(const Eigen::Vector3d &p, const Eigen::Vector3d &p_d);
 };
 
 /**
@@ -237,6 +261,9 @@ void OffboardControl::publish_trajectory_setpoint()
 	msg.yaw = ref.yaw;
 	msg.timestamp = this->get_clock()->now().nanoseconds() / 1000;
 	Eigen::Vector3d p_d = p_ref;
+	
+	publish_paths(p, p_d); // publish path viz
+
 
 	if (control_mode_ == "position") {
 		msg.position = {
@@ -398,6 +425,43 @@ Eigen::Vector3d OffboardControl::compute_acceleration_command(
 		const Eigen::Vector3d w = a_d - K_v_ * e_v - K_p_ * e_p;
 		const Eigen::Vector3d a_cmd = w;
 		return a_cmd;
+}
+
+void OffboardControl::publish_paths(const Eigen::Vector3d &p, const Eigen::Vector3d &p_d) {
+    rclcpp::Time now = this->now();
+
+    //  PoseStamped for actual position
+	// TODO: fix orientation!
+    geometry_msgs::msg::PoseStamped actual_pose;
+    actual_pose.header.stamp = now;
+    actual_pose.header.frame_id = "map";
+    actual_pose.pose.position.x = p.x();
+    actual_pose.pose.position.y = p.y();
+    actual_pose.pose.position.z = -p.z();
+    
+	//  PoseStamped for ref position
+	// TODO: fix orientation!
+    geometry_msgs::msg::PoseStamped ref_pose;
+    ref_pose.header.stamp = now;
+    ref_pose.header.frame_id = "map";
+    ref_pose.pose.position.x = p_d.x();
+    ref_pose.pose.position.y = p_d.y();
+    ref_pose.pose.position.z = -p_d.z();
+
+    actual_path_msg_.poses.push_back(actual_pose);
+    ref_path_msg_.poses.push_back(ref_pose);
+
+    // trim the paths so RViz doesn't lag after 10 minutes of flying
+    if (actual_path_msg_.poses.size() > MAX_PATH_LENGTH) {
+        actual_path_msg_.poses.erase(actual_path_msg_.poses.begin());
+        ref_path_msg_.poses.erase(ref_path_msg_.poses.begin());
+    }
+
+    actual_path_msg_.header.stamp = now;
+    ref_path_msg_.header.stamp = now;
+
+    actual_path_pub_->publish(actual_path_msg_);
+    ref_path_pub_->publish(ref_path_msg_);
 }
 
 int main(int argc, char *argv[])
