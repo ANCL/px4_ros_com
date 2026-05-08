@@ -43,7 +43,8 @@
 #include <px4_msgs/msg/trajectory_setpoint.hpp>
 #include <px4_msgs/msg/vehicle_control_mode.hpp>
 #include <px4_msgs/srv/vehicle_command.hpp>
-//#include <px4_msgs/msg/vehicle_odometry.hpp> // got rid of this t
+#include <px4_msgs/msg/trajectory_setpoint.hpp>
+#include <px4_msgs/msg/vehicle_local_position.hpp>
 #include <px4_msgs/msg/vehicle_local_position.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <stdint.h>
@@ -56,8 +57,13 @@
 #include <Eigen/Core>
 #include <Eigen/Dense>
 
+
 #include <nav_msgs/msg/path.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
+
+using namespace px4_msgs::msg;
+
+
 
 using namespace std::chrono;
 using namespace std::chrono_literals;
@@ -74,6 +80,7 @@ public:
 		offboard_control_mode_publisher_{this->create_publisher<OffboardControlMode>(px4_namespace+"in/offboard_control_mode", 10)},
 		trajectory_setpoint_publisher_{this->create_publisher<TrajectorySetpoint>(px4_namespace+"in/trajectory_setpoint", 10)},
 		vehicle_command_client_{this->create_client<px4_msgs::srv::VehicleCommand>(px4_namespace+"vehicle_command")},
+
 		vehicle_local_position_subscriber_{this->create_subscription<px4_msgs::msg::VehicleLocalPosition>(
             px4_namespace + "out/vehicle_local_position",
             rclcpp::SensorDataQoS(),
@@ -89,6 +96,7 @@ public:
                 latest_local_pos_ = *msg;
                 pos_received_ = true; 
             })},
+
 		trajectory_ref_subscriber_{this->create_subscription<TrajectorySetpoint>(
 			"custom/trajectory_reference",
 			10,
@@ -97,16 +105,11 @@ public:
 				ref_received_ = true;
 			}
 		)},
-		control_mode_{this->declare_parameter<std::string>("control_mode", "position")},
-		start_time_{this->now()},
-		
-		actual_path_pub_{this->create_publisher<nav_msgs::msg::Path>("viz/actual_path", 10)},
-    	ref_path_pub_{this->create_publisher<nav_msgs::msg::Path>("viz/ref_path", 10)}
-		{
-		// set the frame ID for the paths
-		actual_path_msg_.header.frame_id = "map";
-    	ref_path_msg_.header.frame_id = "map";
 
+		control_mode_{this->declare_parameter<std::string>("control_mode", "position")},
+		start_time_{this->now()}
+		
+		{
 		// log and wait for vehicle command service
 		RCLCPP_INFO(this->get_logger(), "Starting Offboard Control example with PX4 services");
 		RCLCPP_INFO_STREAM(this->get_logger(), "Waiting for " << px4_namespace << "vehicle_command service");
@@ -160,23 +163,14 @@ private:
 	Eigen::Matrix3d K_v_ = 1.5 * Eigen::Matrix3d::Identity();
 
 	// initial setpoints
-	Eigen::Vector3d p_d{0.0, 0.0, -5.0};
 	Eigen::Vector3d v_d = Eigen::Vector3d::Zero();
 	Eigen::Vector3d a_d = Eigen::Vector3d::Zero();
 
 	// time
 	rclcpp::Time start_time_;
 
-	// path publishers
-    rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr actual_path_pub_;
-    rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr ref_path_pub_;
-
-    // path message objects to hold the history of points
-    nav_msgs::msg::Path actual_path_msg_;
-    nav_msgs::msg::Path ref_path_msg_;
-
-    // max points to prevent memory from blowing up on long flights
-    const size_t MAX_PATH_LENGTH = 2000;
+	
+    
 
 	// methods
 	void publish_offboard_control_mode();
@@ -185,7 +179,6 @@ private:
 	void response_callback(rclcpp::Client<px4_msgs::srv::VehicleCommand>::SharedFuture future);
     void timer_callback(void);
     Eigen::Vector3d compute_acceleration_command(const Eigen::Vector3d &p, const Eigen::Vector3d &v, const Eigen::Vector3d &p_d, const Eigen::Vector3d &v_d, const Eigen::Vector3d &a_d);
-	void publish_paths(const Eigen::Vector3d &p, const Eigen::Vector3d &p_d);
 };
 
 /**
@@ -241,7 +234,7 @@ void OffboardControl::publish_trajectory_setpoint()
 		RCLCPP_WARN_THROTTLE(
 			this->get_logger(),
 			*this->get_clock(),
-			2000,
+			1000,
 			"Waiting for vehicle local position and trajectory reference");
 		return;
 	}	
@@ -268,16 +261,12 @@ void OffboardControl::publish_trajectory_setpoint()
 	TrajectorySetpoint msg{};
 	msg.yaw = ref.yaw;
 	msg.timestamp = this->get_clock()->now().nanoseconds() / 1000;
-	Eigen::Vector3d p_d = p_ref;
-	
-	publish_paths(p, p_d); // publish path viz
-
 
 	if (control_mode_ == "position") {
 		msg.position = {
-			static_cast<float>(p_d.x()),
-			static_cast<float>(p_d.y()),
-			static_cast<float>(p_d.z())
+			static_cast<float>(p_ref.x()),
+			static_cast<float>(p_ref.y()),
+			static_cast<float>(p_ref.z())
 		};
 		msg.velocity = {NAN, NAN, NAN};
         msg.acceleration = {NAN, NAN, NAN};
@@ -294,9 +283,9 @@ void OffboardControl::publish_trajectory_setpoint()
 		"Unknown control_mode '%s', falling back to position mode",
 		control_mode_.c_str());
 		msg.position = {
-			static_cast<float>(p_d.x()),
-			static_cast<float>(p_d.y()),
-			static_cast<float>(p_d.z())
+			static_cast<float>(p_ref.x()),
+			static_cast<float>(p_ref.y()),
+			static_cast<float>(p_ref.z())
 		};
 		msg.velocity = {NAN, NAN, NAN};
         msg.acceleration = {NAN, NAN, NAN};
@@ -435,49 +424,120 @@ Eigen::Vector3d OffboardControl::compute_acceleration_command(
 		return a_cmd;
 }
 
-void OffboardControl::publish_paths(const Eigen::Vector3d &p, const Eigen::Vector3d &p_d) {
-    rclcpp::Time now = this->now();
+class PathVisualizer : public rclcpp::Node {
+public:
+    PathVisualizer() : Node("path_visualizer_node") {
+        reference_position_subscriber_ =  this->create_subscription<TrajectorySetpoint>(
+            "custom/trajectory_reference",
+            10,
+            [this](const TrajectorySetpoint::SharedPtr msg) {
+                latest_reference_pos_ = *msg;
+                ref_pos_received_ = true;
+            }
+        );
 
-    //  PoseStamped for actual position
-	// TODO: fix orientation!
-    geometry_msgs::msg::PoseStamped actual_pose;
-    actual_pose.header.stamp = now;
-    actual_pose.header.frame_id = "map";
-    actual_pose.pose.position.x = p.x();
-    actual_pose.pose.position.y = p.y();
-    actual_pose.pose.position.z = -p.z();
-    
-	//  PoseStamped for ref position
-	// TODO: fix orientation!
-    geometry_msgs::msg::PoseStamped ref_pose;
-    ref_pose.header.stamp = now;
-    ref_pose.header.frame_id = "map";
-    ref_pose.pose.position.x = p_d.x();
-    ref_pose.pose.position.y = p_d.y();
-    ref_pose.pose.position.z = -p_d.z();
+        actual_position_subscriber_ = this->create_subscription<VehicleLocalPosition>(
+            "/fmu/out/vehicle_local_position", 
+            rclcpp::SensorDataQoS(),
+            [this](const VehicleLocalPosition::SharedPtr msg) {
+                latest_actual_pos_ = *msg;
+                actual_pos_received_ = true;
 
-    actual_path_msg_.poses.push_back(actual_pose);
-    ref_path_msg_.poses.push_back(ref_pose);
+                if (ref_pos_received_) {
+                    update_viz();
+                }
+            }
+        );
 
-    // trim the paths so RViz doesn't lag after 10 minutes of flying
-    if (actual_path_msg_.poses.size() > MAX_PATH_LENGTH) {
-        actual_path_msg_.poses.erase(actual_path_msg_.poses.begin());
-        ref_path_msg_.poses.erase(ref_path_msg_.poses.begin());
+        // create path publishers
+        actual_path_pub_ = this->create_publisher<nav_msgs::msg::Path>("viz/actual_path", 10);
+    	ref_path_pub_ = this->create_publisher<nav_msgs::msg::Path>("viz/ref_path", 10);
+
+        // set the frame ID for the paths
+		actual_path_msg_.header.frame_id = "map";
+    	ref_path_msg_.header.frame_id = "map";
     }
 
-    actual_path_msg_.header.stamp = now;
-    ref_path_msg_.header.stamp = now;
 
-    actual_path_pub_->publish(actual_path_msg_);
-    ref_path_pub_->publish(ref_path_msg_);
-}
+private:
+
+    // reference subscriber
+    rclcpp::Subscription<TrajectorySetpoint>::SharedPtr reference_position_subscriber_;
+    TrajectorySetpoint latest_reference_pos_{};
+    bool ref_pos_received_{false};
+
+    // actual position subscriber
+    rclcpp::Subscription<VehicleLocalPosition>::SharedPtr actual_position_subscriber_;
+    VehicleLocalPosition latest_actual_pos_{};
+    bool actual_pos_received_{false};
+
+
+    // path publishers
+    rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr actual_path_pub_;
+    rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr ref_path_pub_;
+
+    // path message objects to hold the history of points
+    nav_msgs::msg::Path actual_path_msg_;
+    nav_msgs::msg::Path ref_path_msg_;
+
+    // max points to prevent memory from blowing up on long flights
+    const size_t MAX_PATH_LENGTH = 2000;
+
+    // Helper to extract Eigen vectors from PX4 msgs
+    void update_viz() {
+        Eigen::Vector3d p(latest_actual_pos_.x, latest_actual_pos_.y, latest_actual_pos_.z);
+        Eigen::Vector3d p_d(latest_reference_pos_.position[0], latest_reference_pos_.position[1], latest_reference_pos_.position[2]);
+        publish_paths(p, p_d);
+    }
+
+    void publish_paths(const Eigen::Vector3d &p, const Eigen::Vector3d &p_d) {
+        rclcpp::Time now = this->now();
+    
+        // PoseStamped for actual position (NED to ENU flip)
+        auto create_pose = [&](const Eigen::Vector3d &vec) {
+            geometry_msgs::msg::PoseStamped ps;
+            ps.header.stamp = now;
+            ps.header.frame_id = "map";
+            ps.pose.position.x = vec.y();  // East
+            ps.pose.position.y = vec.x();  // North
+            ps.pose.position.z = -vec.z(); // Up
+            return ps;
+        };
+    
+        actual_path_msg_.poses.push_back(create_pose(p));
+        ref_path_msg_.poses.push_back(create_pose(p_d));
+    
+        // trim the paths so RViz doesn't lag after 10 minutes of flying
+        if (actual_path_msg_.poses.size() > MAX_PATH_LENGTH) {
+            actual_path_msg_.poses.erase(actual_path_msg_.poses.begin());
+            ref_path_msg_.poses.erase(ref_path_msg_.poses.begin());
+        }
+    
+        actual_path_msg_.header.stamp = now;
+        ref_path_msg_.header.stamp = now;
+    
+        actual_path_pub_->publish(actual_path_msg_);
+        ref_path_pub_->publish(ref_path_msg_);
+    }
+};
+
+
 
 int main(int argc, char *argv[])
 {
-	setvbuf(stdout, NULL, _IONBF, BUFSIZ);
-	rclcpp::init(argc, argv);
-	rclcpp::spin(std::make_shared<OffboardControl>("/fmu/"));
+    rclcpp::init(argc, argv);
 
-	rclcpp::shutdown();
-	return 0;
+    // Create an executor that can handle multiple nodes
+    rclcpp::executors::SingleThreadedExecutor exec;
+
+    auto offboard_node = std::make_shared<OffboardControl>("/fmu/");
+    auto viz_node = std::make_shared<PathVisualizer>();
+
+    exec.add_node(offboard_node);
+    exec.add_node(viz_node);
+
+    exec.spin();
+
+    rclcpp::shutdown();
+    return 0;
 }

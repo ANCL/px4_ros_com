@@ -19,7 +19,7 @@ def generate_launch_description():
         Node(
             package="px4_ros_com",
             executable="offboard_control_srv",
-            name="offboard_control_srv",
+            #name="offboard_control_srv",
             output="screen",
             parameters=[{
                 "control_mode": control_mode,
