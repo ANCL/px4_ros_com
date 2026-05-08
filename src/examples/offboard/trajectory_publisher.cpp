@@ -40,8 +40,8 @@ private:
             ref = compute_figure8_reference(t_sec);
         } else if (flight_path_ == "circle") {
             ref = compute_circle_reference(t_sec);
-        } else if (flight_path_ == "") {
-
+        } else if (flight_path_ == "helix") {
+            ref = compute_helix_reference(t_sec);
         } else {
             ref = compute_figure8_reference(t_sec);
             RCLCPP_INFO(this->get_logger(), "Fallback to figure8 reference -- flight_path does not exist\nOptions:\nfigure8, circle, etc.");
@@ -87,6 +87,24 @@ private:
         TrajectoryReference ref{};
         ref.position = Eigen::Vector3d(x, y, z_ref);
         ref.velocity = Eigen::Vector3d((omega * (-y)), (omega * x), 0.0);
+        ref.acceleration = Eigen::Vector3d((omega * omega * (-x)), (omega * omega * (-y)), 0.0);
+        ref.yaw = 0.0f;
+        
+        return ref;
+    }
+
+    TrajectoryReference compute_helix_reference(double t_sec) const {
+        const double R = 2.0;
+        const double omega = 0.4;
+        const double g = -1.0;
+
+        const double x = R * std::cos(omega * t_sec);
+        const double y = R * std::sin(omega * t_sec);
+        const double z = g * t_sec;
+
+        TrajectoryReference ref{};
+        ref.position = Eigen::Vector3d(x, y, z);
+        ref.velocity = Eigen::Vector3d((omega * (-y)), (omega * x), g);
         ref.acceleration = Eigen::Vector3d((omega * omega * (-x)), (omega * omega * (-y)), 0.0);
         ref.yaw = 0.0f;
         
