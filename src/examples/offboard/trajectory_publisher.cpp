@@ -42,6 +42,8 @@ private:
             ref = compute_circle_reference(t_sec);
         } else if (flight_path_ == "helix") {
             ref = compute_helix_reference(t_sec);
+        } else if (flight_path_ == "step") {
+            ref = compute_step_reference(t_sec);
         } else {
             ref = compute_figure8_reference(t_sec);
             RCLCPP_INFO(this->get_logger(), "Fallback to figure8 reference -- flight_path does not exist\nOptions:\nfigure8, circle, etc.");
@@ -107,6 +109,23 @@ private:
         ref.velocity = Eigen::Vector3d((omega * (-y)), (omega * x), g);
         ref.acceleration = Eigen::Vector3d((omega * omega * (-x)), (omega * omega * (-y)), 0.0);
         ref.yaw = 0.0f;
+        
+        return ref;
+    }
+
+    TrajectoryReference compute_step_reference(double t_sec) const {
+        //static t_0 = t_sec;
+        TrajectoryReference ref{};
+        
+        const double x = -5.0;
+        const double y = -5.0;
+        const double z = -5.0;
+        
+        ref.position = Eigen::Vector3d(x, y, z);
+        ref.velocity = Eigen::Vector3d(0, 0, 0);
+        ref.acceleration = Eigen::Vector3d(0, 0 , 0);
+        ref.yaw = 0.0f;
+
         
         return ref;
     }
